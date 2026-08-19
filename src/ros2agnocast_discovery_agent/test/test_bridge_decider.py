@@ -11,10 +11,14 @@ import struct
 from ros2agnocast_discovery_agent.bridge_decider import (
     BridgeRequest,
     decide_bridges,
+    decide_service_bridges,
     DIRECTION_AGNOCAST_TO_ROS2,
     DIRECTION_ROS2_TO_AGNOCAST,
     dispatch_requests,
     serialize_request,
+    serialize_service_request,
+    ServiceBridgeRequest,
+    SRV_REQUEST_PREFIX,
 )
 from ros2agnocast_discovery_msgs.msg import (
     AgnocastDaemonState,
@@ -224,3 +228,116 @@ def test_dispatch_routes_to_per_domain_uds(monkeypatch):
         '\x00agnocast_bridge_manager_12345',
         '\x00agnocast_bridge_manager_12345_d5',
     ]
+
+
+# --- cross-namespace service bridging -------------------------------------------------
+#
+# An Agnocast service subscribes to the request topic and an Agnocast client publishes on it, so
+# the roles below are the mirror image of the pub/sub ones: a local *subscriber* means the service
+# lives here and needs R2A.
+
+
+def _srv_topic(service_name, srv_type='example_interfaces/srv/AddTwoInts',
+               pubs=None, subs=None, domain=0):
+    return _topic(SRV_REQUEST_PREFIX + service_name, type_name=srv_type + '_Request',
+                  pubs=pubs, subs=subs, domain=domain)
+
+
+def test_service_decide_emits_r2a_when_local_service_remote_client():
+    local = _state(topics=[_srv_topic('/add', subs=[_endpoint('/svc')])])
+    remote = _state(host_uuid='OTHER', ipc_ns=222,
+                    topics=[_srv_topic('/add', pubs=[_endpoint('/cli')])])
+
+    reqs = decide_service_bridges(local, {('OTHER', 222): remote})
+
+    assert len(reqs) == 1
+    assert reqs[0].service_name == '/add'
+    assert reqs[0].direction == DIRECTION_ROS2_TO_AGNOCAST
+    # The plugin is registered under the service type, not the request message type.
+    assert reqs[0].type_name == 'example_interfaces/srv/AddTwoInts'
+
+
+def test_service_decide_emits_a2r_when_local_client_remote_service():
+    local = _state(topics=[_srv_topic('/add', pubs=[_endpoint('/cli')])])
+    remote = _state(host_uuid='OTHER', ipc_ns=222,
+                    topics=[_srv_topic('/add', subs=[_endpoint('/svc')])])
+
+    reqs = decide_service_bridges(local, {('OTHER', 222): remote})
+
+    assert len(reqs) == 1
+    assert reqs[0].service_name == '/add'
+    assert reqs[0].direction == DIRECTION_AGNOCAST_TO_ROS2
+
+
+def test_service_decide_skips_self_namespace():
+    local = _state(topics=[_srv_topic('/add', subs=[_endpoint('/svc')])])
+    same = _state(topics=[_srv_topic('/add', pubs=[_endpoint('/cli')])])
+
+    assert decide_service_bridges(local, {('HOST', 111): same}) == []
+
+
+def test_service_decide_skips_bridge_endpoints():
+    """A bridge-created endpoint must not keep its own lease alive."""
+    local = _state(topics=[_srv_topic('/add', subs=[_endpoint('/svc')])])
+    remote = _state(host_uuid='OTHER', ipc_ns=222,
+                    topics=[_srv_topic('/add', pubs=[_endpoint('/br', is_bridge=True)])])
+
+    assert decide_service_bridges(local, {('OTHER', 222): remote}) == []
+
+
+def test_service_decide_skips_cross_domain_match():
+    local = _state(topics=[_srv_topic('/add', subs=[_endpoint('/svc')], domain=0)])
+    remote = _state(host_uuid='OTHER', ipc_ns=222,
+                    topics=[_srv_topic('/add', pubs=[_endpoint('/cli')], domain=5)])
+
+    assert decide_service_bridges(local, {('OTHER', 222): remote}) == []
+
+
+def test_service_decide_skips_unresolvable_service_type():
+    """A request topic whose type is not a `_Request` names no service plugin."""
+    local = _state(topics=[_srv_topic('/add', subs=[_endpoint('/svc')], srv_type='')])
+    remote = _state(host_uuid='OTHER', ipc_ns=222,
+                    topics=[_srv_topic('/add', pubs=[_endpoint('/cli')], srv_type='')])
+    # _srv_topic appends '_Request'; strip it back off to make the type unusable.
+    for st in (local, remote):
+        st.topics[0].type_name = 'not_a_request_type'
+
+    assert decide_service_bridges(local, {('OTHER', 222): remote}) == []
+
+
+def test_service_decide_emits_both_directions_when_both_roles_local():
+    """A namespace holding both a service and a client of it needs both halves."""
+    local = _state(topics=[_srv_topic('/add', pubs=[_endpoint('/cli')],
+                                      subs=[_endpoint('/svc')])])
+    remote = _state(host_uuid='OTHER', ipc_ns=222,
+                    topics=[_srv_topic('/add', pubs=[_endpoint('/rcli')],
+                                       subs=[_endpoint('/rsvc')])])
+
+    reqs = decide_service_bridges(local, {('OTHER', 222): remote})
+
+    assert {r.direction for r in reqs} == {DIRECTION_ROS2_TO_AGNOCAST, DIRECTION_AGNOCAST_TO_ROS2}
+
+
+def test_pubsub_decider_ignores_service_topics():
+    """Relaying a request topic as plain pub/sub would drop request/response correlation."""
+    local = _state(topics=[_srv_topic('/add', pubs=[_endpoint('/cli')])])
+    remote = _state(host_uuid='OTHER', ipc_ns=222,
+                    topics=[_srv_topic('/add', subs=[_endpoint('/svc')])])
+
+    assert decide_bridges(local, {('OTHER', 222): remote}) == []
+
+
+def test_serialize_service_request_wire_layout():
+    """4-byte tag + 516-byte payload = 520 bytes, matching the C++ struct."""
+    payload = serialize_service_request(ServiceBridgeRequest(
+        service_name='/add',
+        type_name='example_interfaces/srv/AddTwoInts',
+        direction=DIRECTION_AGNOCAST_TO_ROS2,
+    ))
+
+    assert len(payload) == 520
+    msg_type, name, type_name, direction = struct.unpack('=I256s256sI', payload)
+    assert msg_type == 3  # BridgeMsgType::DaemonService
+    assert name.split(b'\0', 1)[0] == b'/add'
+    assert type_name.split(b'\0', 1)[0] == b'example_interfaces/srv/AddTwoInts'
+    assert direction == DIRECTION_AGNOCAST_TO_ROS2

@@ -230,6 +230,27 @@ bool ServiceBridgeItem::ros2_client_exists(const ServiceBridgeDeps & deps)
   }
 }
 
+// Returns true while a daemon-forced lease for this direction is unexpired, dropping it once it is.
+// A lease stands in for the ROS 2 side endpoint that a peer IPC namespace's bridge would otherwise
+// have to create first, which is what breaks the cross-namespace deadlock described in the header.
+bool ServiceBridgeItem::r2a_forced()
+{
+  const auto now = std::chrono::steady_clock::now();
+  if (r2a_forced_until_.has_value() && !is_daemon_force_active(*r2a_forced_until_, now)) {
+    r2a_forced_until_ = std::nullopt;
+  }
+  return r2a_forced_until_.has_value();
+}
+
+bool ServiceBridgeItem::a2r_forced()
+{
+  const auto now = std::chrono::steady_clock::now();
+  if (a2r_forced_until_.has_value() && !is_daemon_force_active(*a2r_forced_until_, now)) {
+    a2r_forced_until_ = std::nullopt;
+  }
+  return a2r_forced_until_.has_value();
+}
+
 // Returns false if the target Agnocast service does not exist or if an error occurs while checking
 // it (the reason will be set in the error string). "Two or more services share this name" is one
 // such error: the probe below reads at most one entry, so a name collision reads as absence rather
@@ -382,7 +403,7 @@ void ServiceBridgeItem::update_configuration(const BridgeMsgServicePayload & pay
 // Stays in R2A, or takes arrow (6) back to PENDING.
 void ServiceBridgeItem::check_and_update_r2a(const ServiceBridgeDeps & deps)
 {
-  if (agno_service_exists() && ros2_client_exists(deps)) {
+  if (agno_service_exists() && (ros2_client_exists(deps) || r2a_forced())) {
     return;
   }
 
@@ -410,7 +431,7 @@ void ServiceBridgeItem::check_and_update_r2a(const ServiceBridgeDeps & deps)
 // Stays in A2R, or takes arrow (4) back to PENDING.
 void ServiceBridgeItem::check_and_update_a2r(const ServiceBridgeDeps & deps)
 {
-  if (ros2_service_exists(deps)) {
+  if (ros2_service_exists(deps) || a2r_forced()) {
     return;
   }
 
@@ -448,7 +469,7 @@ void ServiceBridgeItem::check_and_update_pending(const ServiceBridgeDeps & deps)
     }
 
     // Arrow (5).
-    if (ros2_client_exists(deps) && start_r2a_bridge(deps) != 0) {
+    if ((ros2_client_exists(deps) || r2a_forced()) && start_r2a_bridge(deps) != 0) {
       RCLCPP_WARN(
         deps.logger, "Failed to start R2A service bridge for '%s': %s", service_name_.c_str(),
         get_error_string());
@@ -460,7 +481,7 @@ void ServiceBridgeItem::check_and_update_pending(const ServiceBridgeDeps & deps)
   release_shadow_node();
 
   // Arrow (3).
-  if (may_start_a2r_bridge_ && ros2_service_exists(deps)) {
+  if (may_start_a2r_bridge_ && (ros2_service_exists(deps) || a2r_forced())) {
     if (start_a2r_bridge(deps) != 0) {
       RCLCPP_WARN(
         deps.logger, "Failed to start A2R service bridge for '%s': %s", service_name_.c_str(),
@@ -469,8 +490,10 @@ void ServiceBridgeItem::check_and_update_pending(const ServiceBridgeDeps & deps)
     return;
   }
 
-  // Arrow (2).
-  if (!agno_client_exists()) {
+  // Arrow (2). A forced item is kept even with no local Agnocast client: the daemon vouches for a
+  // remote one, and destroying the item here would drop the lease that is meant to break the
+  // cross-namespace cycle. The lease's own expiry, not this check, ends that reprieve.
+  if (!agno_client_exists() && !r2a_forced() && !a2r_forced()) {
     RCLCPP_DEBUG(
       deps.logger, "Removing service bridge state-machine for '%s': %s", service_name_.c_str(),
       get_error_string());
@@ -504,6 +527,34 @@ void ServiceBridgeItem::handle_request(const BridgeMsgServicePayload & payload)
 {
   update_configuration(payload);
 
+  if (state_ == ServiceBridgeState::NONE) {
+    state_ = ServiceBridgeState::PENDING;
+  }
+}
+
+void ServiceBridgeItem::handle_daemon_request(const BridgeMsgDaemonServicePayload & payload)
+{
+  if (service_name_.empty()) {
+    service_name_ = static_cast<const char *>(payload.service_name);
+  }
+  if (!service_type_.has_value()) {
+    service_type_ = static_cast<const char *>(payload.service_type);
+  }
+
+  // Latch the same permission flag the matching intra-namespace request would have set. A remote
+  // Agnocast client is what makes an A2R bridge legitimate here, and a remote service an R2A one,
+  // but only the daemon can see either, so its request has to carry that permission itself.
+  const auto deadline = daemon_force_deadline(std::chrono::steady_clock::now());
+  if (payload.direction == BridgeDirection::ROS2_TO_AGNOCAST) {
+    may_start_r2a_bridge_ = true;
+    r2a_forced_until_ = deadline;
+  } else {
+    may_start_a2r_bridge_ = true;
+    a2r_forced_until_ = deadline;
+  }
+
+  // Unlike the pub/sub path, a service item in NONE has already been erased by the manager, so a
+  // fresh one arrives here each tick; move it back to PENDING for check_and_update() to advance.
   if (state_ == ServiceBridgeState::NONE) {
     state_ = ServiceBridgeState::PENDING;
   }

@@ -6,6 +6,7 @@
 
 #include <rclcpp/rclcpp.hpp>
 
+#include <chrono>
 #include <memory>
 #include <optional>
 #include <string>
@@ -51,10 +52,10 @@ struct ServiceBridgeDeps
 //
 // (1) an Agnocast service or client registered
 // (2) !agno_client_exists(), (3) false, and !(may_start_r2a_bridge_ && agno_service_exists())
-// (3) may_start_a2r_bridge_ && ros2_service_exists()
-// (4) !ros2_service_exists()
-// (5) may_start_r2a_bridge_ && agno_service_exists() && ros2_client_exists()
-// (6) !agno_service_exists() || !ros2_client_exists()
+// (3) may_start_a2r_bridge_ && (ros2_service_exists() || daemon-forced A2R)
+// (4) !(ros2_service_exists() || daemon-forced A2R)
+// (5) may_start_r2a_bridge_ && agno_service_exists() && (ros2_client_exists() || daemon-forced R2A)
+// (6) !agno_service_exists() || !(ros2_client_exists() || daemon-forced R2A)
 //
 // Direction lives in flags, not in the state. handle_request() latches may_start_r2a_bridge_ (an
 // Agnocast service registered) and may_start_a2r_bridge_ (an Agnocast client registered), and
@@ -82,6 +83,21 @@ struct ServiceBridgeDeps
 // still running. may_start_r2a_bridge_ is set only by a ServiceRole::Default service, so an
 // AgnocastOnly one never guards anything; and agno_service_exists() reads at most one entry, so it
 // reports false when two or more Agnocast services share the name.
+//
+// Both ROS 2 side conditions -- ros2_client_exists() for (5)/(6) and ros2_service_exists() for
+// (3)/(4) -- can also be satisfied by a daemon-forced lease instead of by a real DDS endpoint.
+// Without that escape hatch, two IPC namespaces bridging one service deadlock. Take an Agnocast
+// service in namespace A and an Agnocast client in namespace B, which reach each other only over
+// DDS. A must build R2A, but (5) wants a ROS 2 client, and the only one that would ever appear is
+// the one B's A2R bridge creates. B must build A2R, but (3) wants a ROS 2 service, and the only
+// one that would ever appear is the one A's R2A bridge creates. Each side's precondition is the
+// other side's postcondition, so neither is ever built and no request crosses.
+//
+// The per-namespace discovery agent already gossips the endpoints of every namespace, so it can
+// see the pairing that neither manager can, and it breaks the cycle by forcing the first bridge
+// up. This mirrors what pub/sub already does for the same cross-namespace topology; services
+// simply never got the same treatment. A lease expires DAEMON_FORCE_TTL after the last request,
+// so a vanished remote endpoint stops being forced and the bridge is reaped normally.
 enum class ServiceBridgeState { NONE, PENDING, A2R, R2A };
 
 class ServiceBridgeItem
@@ -94,6 +110,12 @@ class ServiceBridgeItem
   // Held, never read: an agnocast::Node creates no rcl_node_t of its own, so this stands in for one
   // under its name, in this process. Lifetime is decided in check_and_update_pending().
   std::shared_ptr<rcl_node_t> shadow_node_ = nullptr;
+
+  // Deadlines of the daemon-forced leases, one per direction. A lease stands in for the ROS 2 side
+  // endpoint that a peer namespace's bridge would otherwise have to create first; see the cycle
+  // described above the state diagram. Unset means never forced.
+  std::optional<std::chrono::steady_clock::time_point> r2a_forced_until_ = std::nullopt;
+  std::optional<std::chrono::steady_clock::time_point> a2r_forced_until_ = std::nullopt;
 
   // Configuration members; set once and never modified.
   std::string service_name_;
@@ -115,6 +137,11 @@ class ServiceBridgeItem
 
   bool ros2_service_exists(const ServiceBridgeDeps & deps);
   bool ros2_client_exists(const ServiceBridgeDeps & deps);
+
+  // True while the named direction holds an unexpired daemon-forced lease. Reading these also
+  // drops a lease once it expires, so an item stops being forced without needing a separate sweep.
+  bool r2a_forced();
+  bool a2r_forced();
   bool agno_service_exists();
   bool agno_client_exists();
 
@@ -134,6 +161,10 @@ public:
   void check_and_update(const ServiceBridgeDeps & deps);
 
   void handle_request(const BridgeMsgServicePayload & payload);
+
+  // Registers (or renews) a daemon-forced lease for one direction, and revives an item sitting in
+  // NONE so a cross-namespace pairing can bring up a bridge that no local endpoint asked for.
+  void handle_daemon_request(const BridgeMsgDaemonServicePayload & payload);
 };
 
 }  // namespace agnocast

@@ -18,6 +18,7 @@ enum class BridgeMsgType : uint32_t {
   PubSub = 0,
   Service = 1,
   DaemonPubSub = 2,
+  DaemonService = 3,
 };
 
 struct BridgeMsgPubSubPayload
@@ -48,6 +49,19 @@ struct BridgeMsgDaemonPubSubPayload
   bool qos_is_reliable;
 };
 
+// A cross-IPC-namespace service bridge request from the per-NS discovery agent.
+//
+// The intra-NS BridgeMsgServicePayload is emitted by a local Agnocast endpoint, which is also
+// what supplies the shadow node identity and the service type. A cross-NS request has no such
+// local endpoint on the requesting side, so the type travels in the request itself and the
+// direction says which half of the pair this namespace must build.
+struct BridgeMsgDaemonServicePayload
+{
+  char service_name[SERVICE_NAME_BUFFER_SIZE];
+  char service_type[SERVICE_TYPE_BUFFER_SIZE];
+  BridgeDirection direction;
+};
+
 struct BridgeMsg
 {
   BridgeMsgType type;
@@ -55,6 +69,7 @@ struct BridgeMsg
     BridgeMsgPubSubPayload pubsub;
     BridgeMsgServicePayload service;
     BridgeMsgDaemonPubSubPayload daemon_pubsub;
+    BridgeMsgDaemonServicePayload daemon_service;
   } payload;
 };
 

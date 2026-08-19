@@ -435,6 +435,14 @@ class DiscoveryAgent(Node):
             bridge_decider.dispatch_requests(
                 requests, self._ipc_ns_inode, logger=self.get_logger())
 
+        # Re-issued every tick like the pub/sub ones: each request renews a lease that expires
+        # DAEMON_FORCE_TTL after the last one, so a bridge outlives a few missed ticks but not a
+        # remote endpoint that has actually gone away.
+        service_requests = bridge_decider.decide_service_bridges(local_state, remote_states)
+        if service_requests:
+            bridge_decider.dispatch_service_requests(
+                service_requests, self._ipc_ns_inode, logger=self.get_logger())
+
     def build_state(self) -> AgnocastDaemonState:
         msg = AgnocastDaemonState()
         msg.schema_version = SCHEMA_VERSION
