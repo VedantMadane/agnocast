@@ -16,7 +16,8 @@ struct KernelThreadInfo
   int64_t tid = -1;
   std::string comm;             // /proc/<pid>/comm, trailing newline stripped
   std::string policy;           // "SCHED_OTHER" etc., or "UNKNOWN(<n>)" for unmapped values
-  int priority = 0;             // nice for OTHER/BATCH/IDLE, rt_priority for FIFO/RR, 0 otherwise
+  int nice = 0;                 // stat nice; meaningful for OTHER/BATCH/IDLE
+  int rt_priority = 0;          // stat rt_priority; meaningful for FIFO/RR
   std::string affinity;         // raw Cpus_allowed_list string, e.g. "0-15"
   bool no_setaffinity = false;  // PF_NO_SETAFFINITY: per-CPU kthread, affinity fixed by kernel
 };
@@ -40,7 +41,8 @@ std::vector<IrqInfo> scan_irqs(
   const std::string & proc_irq_root = "/proc/irq",
   const std::string & sys_irq_root = "/sys/kernel/irq");
 
-// nullopt when the IRQ directory or its actions file is missing/unreadable.
+// nullopt when the IRQ directory or its actions file is missing, unreadable,
+// or empty (the IRQ is no longer device-backed, matching scan_irqs).
 std::optional<std::string> read_irq_actions(
   int irq, const std::string & sys_irq_root = "/sys/kernel/irq");
 
