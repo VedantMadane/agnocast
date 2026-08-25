@@ -183,7 +183,7 @@ Each interface is accessible via getter methods such as `get_node_base_interface
 | `get_client_names_and_types_by_node()` | ✗ | **Throws Exception** | No | Agnocast does not officially support Service |
 | `get_publisher_names_and_types_by_node()` | ✗ | **Throws Exception** | No | To support this, topic_name and topic_type must be managed within the kmod; however, they are currently not managed |
 | `get_subscriber_names_and_types_by_node()` | ✗ | **Throws Exception** | No | To support this, topic_name and topic_type must be managed within the kmod; however, they are currently not managed |
-| `get_node_names()` | ✗ | **Throws Exception** | Yes | To support this, the kmod must report the nodes owning an agnocast endpoint; it currently does not |
+| `get_node_names()` | ✓ | **Partial Support** | - | Returns the nodes of the caller's IPC namespace and `ROS_DOMAIN_ID` that own at least one non-bridge agnocast publisher/subscriber, plus the caller itself. DDS is not consulted, so an `rclcpp::Node` without an agnocast endpoint is not reported (see [ROS 2 node visibility](#ros-2-node-visibility)). Beyond `MAX_NODE_NUM` (1024) nodes the kmod side is dropped entirely and logged as an error. Duplicate node names are preserved, as in rclcpp |
 | `get_node_names_with_enclaves()` | ✗ | **Throws Exception** | No | |
 | `get_node_names_and_namespaces()` | ✗ | **Throws Exception** | No | To support this, namespace must be managed within the kmod; however, they are currently not managed |
 | `count_publishers()` | ✓ | **Full Support** | - | Counts agnocast and ROS 2 publishers, excluding those created by bridges. `agnocast::Node::count_publishers()` delegates here |
@@ -196,6 +196,18 @@ Each interface is accessible via getter methods such as `get_node_base_interface
 | `count_graph_users()` | ✗ | **Throws Exception** | No | |
 | `get_publishers_info_by_topic()` | ✗ | **Throws Exception** | No | To support this, namespace and topic_type must be managed within the kmod; however, they are currently not managed |
 | `get_subscriptions_info_by_topic()` | ✗ | **Throws Exception** | No | To support this, namespace and topic_type must be managed within the kmod; however, they are currently not managed |
+
+#### ROS 2 node visibility
+
+`agnocast::Node` creates no DDS participant, so it cannot observe the ROS 2 graph.
+`get_node_names()` reports what the kmod knows instead: the nodes of the caller's IPC namespace and `ROS_DOMAIN_ID` that own at least one non-bridge agnocast endpoint.
+
+Consequences worth knowing:
+
+- An `rclcpp::Node` that holds no agnocast endpoint is **not** reported, even though `rclcpp::Node::get_node_names()` would report it.
+- **Same-name nodes in one process** collapse into a single entry. rclcpp cannot tell those apart either: a node has no identity of its own beyond its participant, so agnocast likewise keys nodes on `(pid, fully qualified name)`. Same-name nodes in different processes are reported once each.
+- A node that owns no endpoint yet is reported only when it is the caller, because the kmod has never heard of it.
+- `get_node_names_and_namespaces()` throws: the kmod stores only the fully qualified name.
 
 ---
 
@@ -343,7 +355,7 @@ The following tables compare methods that are **directly defined** in each class
 
 | API | rclcpp::Node | agnocast::Node |
 |-----|:------------:|:--------------:|
-| `get_node_names()` | ✓ | ✗ |
+| `get_node_names()` | ✓ | ✓ |
 | `get_topic_names_and_types()` | ✓ | ✗ |
 | `get_service_names_and_types()` | ✓ | ✗ |
 | `get_service_names_and_types_by_node()` | ✓ | ✗ |
