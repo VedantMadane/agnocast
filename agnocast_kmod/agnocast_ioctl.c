@@ -1676,21 +1676,24 @@ unlock:
   return ret;
 }
 
+// Everything get_node_names does under global_htables_rwsem is allocation-free and does no
+// copy_to_user: both can sleep, and the semaphore is writer-preferring, so a sleeping reader
+// stalls every publish behind a waiting add/remove endpoint. Hence the scratch space below,
+// allocated before the lock is taken, and the packed kernel buffer the caller copies out after
+// the lock is dropped.
+
 // Open-addressing set used to deduplicate the collected nodes while the read lock is held.
 // Slots hold `entry index + 1` into `entries`, so 0 means empty. Sized well above MAX_NODE_NUM so
 // that probing always terminates on a free slot.
 #define NODE_NAME_SLOT_BITS 11
 #define NODE_NAME_SLOT_NUM (1u << NODE_NAME_SLOT_BITS)
 
-// One collected node: where its name sits in the packed buffer, plus the pid that owns it.
 struct collected_node
 {
   uint32_t name_offset;
   pid_t pid;
 };
 
-// Scratch space for one get_node_names call. Allocated before the lock is taken, because
-// allocation can sleep.
 struct node_name_collector
 {
   uint32_t * slots;
@@ -1701,9 +1704,6 @@ struct node_name_collector
   uint32_t num;
 };
 
-// Appends `name` to the packed buffer unless (pid, name) was already collected. Performs no
-// allocation and nothing that can sleep, because it runs under global_htables_rwsem.
-//
 // The dedup key is (pid, name) rather than the name alone: one node registers the same name once
 // per endpoint it owns, which must collapse, while two same-named nodes in different processes are
 // distinct nodes that rclcpp would report twice. Two same-named nodes inside one process still
@@ -1742,11 +1742,6 @@ static int add_unique_node(struct node_name_collector * col, const char * name, 
   col->num++;
   return 0;
 }
-
-// The read section deliberately does no allocation and no copy_to_user: both can sleep, and
-// global_htables_rwsem is writer-preferring, so a sleeping reader stalls every publish behind a
-// waiting add/remove endpoint. Names are packed into a kernel buffer here and handed to
-// user-space by the caller after the lock is dropped.
 
 // Collects the nodes owning an endpoint of one topic. Caller holds global_htables_rwsem.
 static int collect_node_names_of_topic(
@@ -3249,8 +3244,6 @@ static long get_node_names_cmd(union ioctl_get_node_names_args __user * arg)
   char __user * user_buf =
     (char __user *)u64_to_user_ptr(get_node_names_args.node_name_buffer_addr);
 
-  // Staged in kernel memory so that the node names can be collected without doing copy_to_user
-  // while holding global_htables_rwsem.
   char * buf = kvmalloc(buf_size, GFP_KERNEL);
   if (!buf) return -ENOMEM;
 

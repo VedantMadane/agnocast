@@ -81,10 +81,8 @@ std::vector<std::string> query_agnocast_node_names()
   get_node_names_args.node_name_buffer_addr = reinterpret_cast<uint64_t>(buffer.data());
   get_node_names_args.node_name_buffer_size = static_cast<uint32_t>(buffer.size());
   if (ioctl(agnocast_fd, AGNOCAST_GET_NODE_NAMES_CMD, &get_node_names_args) < 0) {
-    // More than MAX_NODE_NUM nodes is a graph too large to report, not a broken kmod state, so it
-    // must not take the caller down the way the other ioctl wrappers do. The kmod writes nothing
-    // back in this case, so the answer degrades to the calling node alone -- still a better answer
-    // to a query than killing the process asking it.
+    // A graph too large to report is not a broken kmod state, so unlike the other ioctl wrappers
+    // this one must not take the caller down.
     if (errno == ENOBUFS) {
       RCLCPP_ERROR(
         logger,
@@ -111,11 +109,6 @@ std::vector<std::string> query_agnocast_node_names()
 }
 }  // namespace
 
-// Reports the nodes the kmod knows about -- those owning at least one agnocast endpoint in this
-// IPC namespace and ROS_DOMAIN_ID -- and nothing else. A `rclcpp::Node` that holds no agnocast
-// endpoint is therefore missing even though `rclcpp` would report it, because DDS is never
-// consulted here.
-//
 // Duplicate names survive: `rclcpp` reports a name once per node that carries it, and the kmod
 // likewise counts two same-named nodes in different processes as two.
 std::vector<std::string> NodeGraph::get_node_names() const
