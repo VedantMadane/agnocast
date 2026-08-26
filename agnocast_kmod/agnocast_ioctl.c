@@ -1790,8 +1790,6 @@ int agnocast_ioctl_get_node_names(
   int bkt_topic;
   hash_for_each(topic_hashtable, bkt_topic, wrapper, node)
   {
-    // Endpoints of both domains of a domain-bridged pair live in one shared topic_struct, so
-    // filter on the wrapper to visit that table once and on the endpoint to pick this domain.
     if (!ipc_eq(ipc_ns, wrapper->ipc_ns) || wrapper->domain_id != domain_id) {
       continue;
     }
