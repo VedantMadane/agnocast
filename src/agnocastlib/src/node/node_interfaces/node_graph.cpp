@@ -82,8 +82,9 @@ std::vector<std::string> query_agnocast_node_names()
   get_node_names_args.node_name_buffer_size = static_cast<uint32_t>(buffer.size());
   if (ioctl(agnocast_fd, AGNOCAST_GET_NODE_NAMES_CMD, &get_node_names_args) < 0) {
     // More than MAX_NODE_NUM nodes is a graph too large to report, not a broken kmod state, so it
-    // must not take the caller down the way the other ioctl wrappers do: a partial graph is a far
-    // better answer to a query than killing the process asking it.
+    // must not take the caller down the way the other ioctl wrappers do. The kmod writes nothing
+    // back in this case, so the answer degrades to the calling node alone -- still a better answer
+    // to a query than killing the process asking it.
     if (errno == ENOBUFS) {
       RCLCPP_ERROR(
         logger,
