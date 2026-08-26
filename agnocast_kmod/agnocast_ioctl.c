@@ -1683,21 +1683,20 @@ unlock:
 // the lock is dropped.
 
 // Open-addressing set used to deduplicate the collected nodes while the read lock is held.
-// Slots hold `entry index + 1` into `entries`, so 0 means empty. Sized well above MAX_NODE_NUM so
-// that probing always terminates on a free slot.
+// Sized well above MAX_NODE_NUM so that probing always terminates on a free slot.
 #define NODE_NAME_SLOT_BITS 11
 #define NODE_NAME_SLOT_NUM (1u << NODE_NAME_SLOT_BITS)
 
 struct collected_node
 {
   uint32_t name_offset;
+  // 0 marks a free slot: an endpoint's pid is a tgid, which is never 0.
   pid_t pid;
 };
 
 struct node_name_collector
 {
-  uint32_t * slots;
-  struct collected_node * entries;
+  struct collected_node * slots;
   char * buf;
   size_t buf_size;
   size_t used;
@@ -1714,9 +1713,9 @@ static int add_unique_node(struct node_name_collector * col, const char * name, 
   const size_t len = strlen(name) + 1;
   uint32_t idx = full_name_hash(NULL, name, len - 1) & (NODE_NAME_SLOT_NUM - 1);
 
-  while (col->slots[idx] != 0) {
-    const struct collected_node * entry = &col->entries[col->slots[idx] - 1];
-    if (entry->pid == pid && strcmp(&col->buf[entry->name_offset], name) == 0) {
+  while (col->slots[idx].pid != 0) {
+    const struct collected_node * slot = &col->slots[idx];
+    if (slot->pid == pid && strcmp(&col->buf[slot->name_offset], name) == 0) {
       return 0;  // already collected
     }
     idx = (idx + 1) & (NODE_NAME_SLOT_NUM - 1);
@@ -1735,9 +1734,8 @@ static int add_unique_node(struct node_name_collector * col, const char * name, 
   }
 
   memcpy(col->buf + col->used, name, len);
-  col->entries[col->num].name_offset = (uint32_t)col->used;
-  col->entries[col->num].pid = pid;
-  col->slots[idx] = col->num + 1;
+  col->slots[idx].name_offset = (uint32_t)col->used;
+  col->slots[idx].pid = pid;
   col->used += len;
   col->num++;
   return 0;
@@ -1785,11 +1783,6 @@ int agnocast_ioctl_get_node_names(
 
   col.slots = kvcalloc(NODE_NAME_SLOT_NUM, sizeof(*col.slots), GFP_KERNEL);
   if (!col.slots) return -ENOMEM;
-  col.entries = kvcalloc(MAX_NODE_NUM, sizeof(*col.entries), GFP_KERNEL);
-  if (!col.entries) {
-    kvfree(col.slots);
-    return -ENOMEM;
-  }
 
   down_read(&global_htables_rwsem);
 
@@ -1812,7 +1805,6 @@ int agnocast_ioctl_get_node_names(
 
 unlock:
   up_read(&global_htables_rwsem);
-  kvfree(col.entries);
   kvfree(col.slots);
   return ret;
 }
