@@ -14,27 +14,22 @@ size_t get_default_domain_id()
 {
   // Seed with 0 so unset/empty ROS_DOMAIN_ID (rcl leaves the out-param
   // unchanged) yields the same default domain rcl ultimately uses.
-  const char * env_value = std::getenv("ROS_DOMAIN_ID");
-  // rcl uses strtoul, which treats a leading '-' as ULONG_MAX rather than an
-  // error. Reject signed values up front so negatives fall back to 0.
-  if (env_value != nullptr) {
-    const char * p = env_value;
-    while (*p == ' ' || *p == '\t') {
-      ++p;
-    }
-    if (*p == '-') {
-      RCLCPP_WARN(
-        rclcpp::get_logger("cie_thread_configurator"),
-        "Invalid ROS_DOMAIN_ID '%s'; falling back to default domain ID 0",
-        env_value);
-      return 0;
-    }
-  }
-
   size_t domain_id = 0;
   const rcl_ret_t ret = rcl_get_default_domain_id(&domain_id);
   if (ret != RCL_RET_OK) {
     rcl_reset_error();
+    const char * env_value = std::getenv("ROS_DOMAIN_ID");
+    RCLCPP_WARN(
+      rclcpp::get_logger("cie_thread_configurator"),
+      "Invalid ROS_DOMAIN_ID '%s'; falling back to default domain ID 0",
+      env_value != nullptr ? env_value : "");
+    return 0;
+  }
+  // rcl parses ROS_DOMAIN_ID with strtoul. A leading '-' becomes ULONG_MAX /
+  // RCL_DEFAULT_DOMAIN_ID with RCL_RET_OK; rclcpp then treats that sentinel as
+  // the default domain (0). Normalize so callers see the same domain id.
+  if (domain_id == RCL_DEFAULT_DOMAIN_ID) {
+    const char * env_value = std::getenv("ROS_DOMAIN_ID");
     RCLCPP_WARN(
       rclcpp::get_logger("cie_thread_configurator"),
       "Invalid ROS_DOMAIN_ID '%s'; falling back to default domain ID 0",
